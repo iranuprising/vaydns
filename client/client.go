@@ -1,21 +1,4 @@
 // Package client provides a reusable DNS tunnel client library.
-//
-// It provides configuration options for VayDNS features (DoH/DoT transports,
-// per-query UDP, forged response filtering, rate limiting, dnstt wire
-// compatibility, etc.).
-//
-// Basic usage (xray-core compatible):
-//
-//	r, _ := client.NewResolver(client.ResolverTypeUDP, "8.8.8.8:53")
-//	ts, _ := client.NewTunnelServer("t.example.com", "pubkey-hex")
-//	t, _ := client.NewTunnel(r, ts)
-//	t.InitiateResolverConnection()
-//	t.InitiateDNSPacketConn(ts.Addr)
-//	t.InitiateKCPConn(ts.MTU)
-//	t.InitiateNoiseChannel()
-//	t.InitiateSmuxSession()
-//	stream, _ := t.OpenStream() // returns net.Conn
-//	defer t.Close()
 package client
 
 import (
@@ -30,9 +13,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/net2share/vaydns/dns"
-	"github.com/net2share/vaydns/noise"
-	"github.com/net2share/vaydns/turbotunnel"
+	"vaydns-go/dns"
+	"vaydns-go/noise"
+	"vaydns-go/turbotunnel"
 	utls "github.com/refraction-networking/utls"
 	log "github.com/sirupsen/logrus"
 	"github.com/xtaci/kcp-go/v5"
@@ -71,28 +54,18 @@ const (
 // Resolver holds DNS resolver configuration.
 type Resolver struct {
 	ResolverType ResolverType
-	ResolverAddr string // UDP: "1.1.1.1:53", DoT: "resolver:853", DoH: "https://resolver/dns-query"
+	ResolverAddr string
 
-	// UTLSClientHelloID sets the uTLS fingerprint for DoH/DoT connections.
-	// nil means no uTLS (plain TLS).
 	UTLSClientHelloID *utls.ClientHelloID
+	RoundTripper      http.RoundTripper
+	DialerControl     func(network, address string, c syscall.RawConn) error
 
-	// RoundTripper overrides the HTTP transport for DoH. If set,
-	// UTLSClientHelloID is ignored for DoH.
-	RoundTripper http.RoundTripper
-
-	// DialerControl is an optional callback for setting socket options
-	// (SO_MARK, SO_BINDTODEVICE, etc.) on UDP sockets.
-	DialerControl func(network, address string, c syscall.RawConn) error
-
-	// UDP transport settings (only apply to ResolverTypeUDP).
-	UDPWorkers      int           // concurrent UDP workers (0 = DefaultUDPWorkers)
-	UDPSharedSocket bool          // use single shared socket instead of per-query
-	UDPTimeout      time.Duration // per-query response timeout (0 = DefaultUDPResponseTimeout)
-	UDPAcceptErrors bool          // pass through non-NOERROR responses (default: filter)
+	UDPWorkers      int
+	UDPSharedSocket bool
+	UDPTimeout      time.Duration
+	UDPAcceptErrors bool
 }
 
-// NewResolver creates a Resolver with the given type and address.
 func NewResolver(resolverType ResolverType, resolverAddr string) (Resolver, error) {
 	switch resolverType {
 	case ResolverTypeUDP, ResolverTypeDOT, ResolverTypeDOH:
@@ -105,48 +78,28 @@ func NewResolver(resolverType ResolverType, resolverAddr string) (Resolver, erro
 	}, nil
 }
 
-// TunnelServer holds tunnel server configuration (domain + public key).
 type TunnelServer struct {
 	Addr               dns.Name
 	PubKey             string
-	MTU                int // auto-computed if 0 when InitiateKCPConn is called
+	MTU                int
 	decodedNoisePubKey []byte
-
-	// DnsttCompat enables the original dnstt wire format (8-byte ClientID,
-	// padding prefixes). When true, ClientIDSize is forced to 8.
-	DnsttCompat bool
-
-	// ClientIDSize is the ClientID size in bytes (default: 2).
-	// Ignored when DnsttCompat is true.
-	ClientIDSize int
-
-	// MaxQnameLen is the maximum QNAME wire length (default: 101, or 253 with DnsttCompat).
-	MaxQnameLen int
-
-	// MaxNumLabels is the maximum number of data labels (default: 0 = unlimited).
-	MaxNumLabels int
-
-	// RPS limits outgoing DNS queries per second (default: 0 = unlimited).
-	RPS float64
-
-	// RecordType selects the DNS record type for downstream data.
-	// Supported values: "txt" (default), "cname", "a", "aaaa", "mx", "ns", "srv".
-	RecordType string
+	DnsttCompat        bool
+	ClientIDSize       int
+	MaxQnameLen        int
+	MaxNumLabels       int
+	RPS                float64
+	RecordType         string
 }
 
-// NewTunnelServer creates a TunnelServer from a domain string and hex-encoded
-// public key.
 func NewTunnelServer(addr string, pubKeyString string) (TunnelServer, error) {
 	domain, err := dns.ParseName(addr)
 	if err != nil {
 		return TunnelServer{}, fmt.Errorf("invalid domain %+q: %w", addr, err)
 	}
-
 	pubkey, err := noise.DecodeKey(pubKeyString)
 	if err != nil {
 		return TunnelServer{}, fmt.Errorf("pubkey format error: %w", err)
 	}
-
 	return TunnelServer{
 		Addr:               domain,
 		PubKey:             pubKeyString,
@@ -154,7 +107,6 @@ func NewTunnelServer(addr string, pubKeyString string) (TunnelServer, error) {
 	}, nil
 }
 
-// wireConfig returns the WireConfig derived from the TunnelServer settings.
 func (ts *TunnelServer) wireConfig() turbotunnel.WireConfig {
 	if ts.DnsttCompat {
 		return turbotunnel.WireConfig{ClientIDSize: 8, Compat: true}
@@ -166,7 +118,6 @@ func (ts *TunnelServer) wireConfig() turbotunnel.WireConfig {
 	return turbotunnel.WireConfig{ClientIDSize: size}
 }
 
-// effectiveRRType returns the DNS RR type for downstream data.
 func (ts *TunnelServer) effectiveRRType() uint16 {
 	rt, err := dns.ParseRecordType(ts.RecordType)
 	if err != nil {
@@ -175,7 +126,6 @@ func (ts *TunnelServer) effectiveRRType() uint16 {
 	return rt
 }
 
-// effectiveMaxQnameLen returns the max QNAME length, applying dnstt defaults.
 func (ts *TunnelServer) effectiveMaxQnameLen() int {
 	if ts.MaxQnameLen > 0 {
 		return ts.MaxQnameLen
@@ -186,27 +136,24 @@ func (ts *TunnelServer) effectiveMaxQnameLen() int {
 	return 101
 }
 
-// Tunnel represents a DNS tunnel connection. Create with NewTunnel, then
-// either call the step-by-step Initiate* methods (for embedding in frameworks
-// like xray-core) or call ListenAndServe for a fully managed session.
 type Tunnel struct {
 	Resolver     Resolver
 	TunnelServer TunnelServer
+	Context      context.Context
 
-	// Session configuration. Zero values use defaults.
-	IdleTimeout          time.Duration                 // default: 10s (2m with DnsttCompat)
-	KeepAlive            time.Duration                 // default: 2s (10s with DnsttCompat)
-	OpenStreamTimeout    time.Duration                 // default: 10s
-	MaxStreams           int                           // default: 0 (0 = unlimited)
-	ReconnectMinDelay    time.Duration                 // default: 1s
-	ReconnectMaxDelay    time.Duration                 // default: 30s
-	SessionCheckInterval time.Duration                 // default: 500ms
-	HandshakeTimeout     time.Duration                 // default: 15s
-	PacketQueueSize      int                           // default: QueueSize (512)
-	KCPWindowSize        int                           // default: PacketQueueSize/2
-	QueueOverflowMode    turbotunnel.QueueOverflowMode // default: drop
+	IdleTimeout          time.Duration
+	KeepAlive            time.Duration
+	OpenStreamTimeout    time.Duration
+	MaxStreams           int
+	ReconnectMinDelay    time.Duration
+	ReconnectMaxDelay    time.Duration
+	SessionCheckInterval time.Duration
+	HandshakeTimeout     time.Duration
+	PacketQueueSize      int
+	KCPWindowSize        int
+	QueueOverflowMode    turbotunnel.QueueOverflowMode
+	ReadyCallback        func(string)
 
-	// internal state
 	wireConfig    turbotunnel.WireConfig
 	forgedStats   *ForgedStats
 	resolverConn  net.PacketConn
@@ -215,10 +162,9 @@ type Tunnel struct {
 	noiseChannel  io.ReadWriteCloser
 	smuxSession   *smux.Session
 	remoteAddr    net.Addr
+	connWG        sync.WaitGroup
 }
 
-// NewTunnel creates a Tunnel with the given resolver and server configuration.
-// Zero-value fields use sensible defaults.
 func NewTunnel(resolver Resolver, tunnelServer TunnelServer) (*Tunnel, error) {
 	t := &Tunnel{
 		Resolver:     resolver,
@@ -230,7 +176,6 @@ func NewTunnel(resolver Resolver, tunnelServer TunnelServer) (*Tunnel, error) {
 
 func (t *Tunnel) applyDefaults() {
 	isDnstt := t.TunnelServer.DnsttCompat
-
 	if t.IdleTimeout == 0 {
 		if isDnstt {
 			t.IdleTimeout = DnsttIdleTimeout
@@ -245,104 +190,65 @@ func (t *Tunnel) applyDefaults() {
 			t.KeepAlive = DefaultKeepAlive
 		}
 	}
-	if t.OpenStreamTimeout == 0 {
-		t.OpenStreamTimeout = DefaultOpenStreamTimeout
-	}
-	if t.MaxStreams == 0 {
-		t.MaxStreams = DefaultMaxStreams
-	}
-	if t.ReconnectMinDelay == 0 {
-		t.ReconnectMinDelay = DefaultReconnectDelay
-	}
-	if t.ReconnectMaxDelay == 0 {
-		t.ReconnectMaxDelay = DefaultReconnectMaxDelay
-	}
-	if t.SessionCheckInterval == 0 {
-		t.SessionCheckInterval = DefaultSessionCheckInterval
-	}
-	if t.HandshakeTimeout == 0 {
-		t.HandshakeTimeout = DefaultHandshakeTimeout
-	}
+	if t.OpenStreamTimeout == 0 { t.OpenStreamTimeout = DefaultOpenStreamTimeout }
+	if t.MaxStreams == 0 { t.MaxStreams = DefaultMaxStreams }
+	if t.ReconnectMinDelay == 0 { t.ReconnectMinDelay = DefaultReconnectDelay }
+	if t.ReconnectMaxDelay == 0 { t.ReconnectMaxDelay = DefaultReconnectMaxDelay }
+	if t.SessionCheckInterval == 0 { t.SessionCheckInterval = DefaultSessionCheckInterval }
+	if t.HandshakeTimeout == 0 { t.HandshakeTimeout = DefaultHandshakeTimeout }
+	if t.Context == nil { t.Context = context.Background() }
 }
 
 func (t *Tunnel) effectivePacketQueueSize() int {
-	if t.PacketQueueSize > 0 {
-		return t.PacketQueueSize
-	}
+	if t.PacketQueueSize > 0 { return t.PacketQueueSize }
 	return turbotunnel.QueueSize
 }
 
 func (t *Tunnel) effectiveQueueOverflowMode() turbotunnel.QueueOverflowMode {
-	if t.QueueOverflowMode != "" {
-		return t.QueueOverflowMode
-	}
+	if t.QueueOverflowMode != "" { return t.QueueOverflowMode }
 	return turbotunnel.DefaultQueueOverflowMode
 }
 
 func (t *Tunnel) effectiveKCPWindowSize() int {
-	if t.KCPWindowSize > 0 {
-		return t.KCPWindowSize
-	}
+	if t.KCPWindowSize > 0 { return t.KCPWindowSize }
 	ws := t.effectivePacketQueueSize() / 2
-	if ws < 1 {
-		ws = 1
-	}
+	if ws < 1 { ws = 1 }
 	return ws
 }
 
-// InitiateResolverConnection creates the underlying transport connection
-// based on the Resolver configuration.
 func (t *Tunnel) InitiateResolverConnection() error {
 	r := t.Resolver
 	switch r.ResolverType {
 	case ResolverTypeUDP:
 		addr, err := net.ResolveUDPAddr("udp", r.ResolverAddr)
-		if err != nil {
-			return err
-		}
+		if err != nil { return err }
 		t.remoteAddr = addr
 		if r.UDPSharedSocket {
 			lc := net.ListenConfig{Control: r.DialerControl}
 			conn, err := lc.ListenPacket(context.Background(), "udp", ":0")
-			if err != nil {
-				return err
-			}
+			if err != nil { return err }
 			t.resolverConn = conn
 		} else {
 			workers := r.UDPWorkers
-			if workers <= 0 {
-				workers = DefaultUDPWorkers
-			}
+			if workers <= 0 { workers = DefaultUDPWorkers }
 			timeout := r.UDPTimeout
-			if timeout <= 0 {
-				timeout = DefaultUDPResponseTimeout
-			}
+			if timeout <= 0 { timeout = DefaultUDPResponseTimeout }
 			conn, forgedStats, err := NewUDPPacketConn(addr, r.DialerControl, workers, timeout, !r.UDPAcceptErrors, t.effectivePacketQueueSize(), t.effectiveQueueOverflowMode())
-			if err != nil {
-				return err
-			}
+			if err != nil { return err }
 			t.forgedStats = forgedStats
 			t.resolverConn = conn
 		}
 		return nil
-
 	case ResolverTypeDOH:
 		t.remoteAddr = turbotunnel.DummyAddr{}
 		var rt http.RoundTripper
-		if r.RoundTripper != nil {
-			rt = r.RoundTripper
-		} else if r.UTLSClientHelloID != nil {
+		if r.RoundTripper != nil { rt = r.RoundTripper } else if r.UTLSClientHelloID != nil {
 			rt = NewUTLSRoundTripper(nil, r.UTLSClientHelloID)
-		} else {
-			rt = http.DefaultTransport
-		}
+		} else { rt = http.DefaultTransport }
 		conn, err := NewHTTPPacketConn(rt, r.ResolverAddr, 8, t.effectivePacketQueueSize(), t.effectiveQueueOverflowMode())
-		if err != nil {
-			return err
-		}
+		if err != nil { return err }
 		t.resolverConn = conn
 		return nil
-
 	case ResolverTypeDOT:
 		t.remoteAddr = turbotunnel.DummyAddr{}
 		var dialTLSContext func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -357,47 +263,35 @@ func (t *Tunnel) InitiateResolverConnection() error {
 			}
 		}
 		conn, err := NewTLSPacketConn(r.ResolverAddr, dialTLSContext, t.effectivePacketQueueSize(), t.effectiveQueueOverflowMode())
-		if err != nil {
-			return err
-		}
+		if err != nil { return err }
 		t.resolverConn = conn
 		return nil
-
 	default:
 		return fmt.Errorf("unsupported resolver type: %s", r.ResolverType)
 	}
 }
 
-// InitiateDNSPacketConn wraps the resolver connection with DNS encoding.
 func (t *Tunnel) InitiateDNSPacketConn(domain dns.Name) error {
 	var rateLimiter *RateLimiter
-	if t.TunnelServer.RPS > 0 {
-		rateLimiter = NewRateLimiter(t.TunnelServer.RPS)
-	}
+	if t.TunnelServer.RPS > 0 { rateLimiter = NewRateLimiter(t.TunnelServer.RPS) }
 	maxQnameLen := t.TunnelServer.effectiveMaxQnameLen()
 	rrType := t.TunnelServer.effectiveRRType()
 	t.dnsPacketConn = NewDNSPacketConn(t.resolverConn, t.remoteAddr, domain, rateLimiter, maxQnameLen, t.TunnelServer.MaxNumLabels, t.wireConfig, t.forgedStats, rrType, t.effectivePacketQueueSize(), t.effectiveQueueOverflowMode())
 	return nil
 }
 
-// InitiateKCPConn opens a KCP connection over the DNS packet connection.
-// If mtu is 0, it is auto-computed from the domain and QNAME constraints.
 func (t *Tunnel) InitiateKCPConn(mtu int) error {
 	if mtu <= 0 {
 		maxQnameLen := t.TunnelServer.effectiveMaxQnameLen()
 		mtu = DNSNameCapacity(t.TunnelServer.Addr, maxQnameLen, t.TunnelServer.MaxNumLabels) - t.wireConfig.DataOverhead()
 	}
 	if mtu < 25 {
-		return fmt.Errorf("MTU %d is too small (minimum 25); try increasing -max-qname-len (currently %d), increasing -max-num-labels (currently %d), using a shorter domain, or decreasing -clientid-size (currently %d)",
-			mtu, t.TunnelServer.effectiveMaxQnameLen(), t.TunnelServer.MaxNumLabels, t.wireConfig.ClientIDSize)
+		return fmt.Errorf("MTU %d is too small (minimum 25)", mtu)
 	}
 	t.TunnelServer.MTU = mtu
 	log.Infof("effective MTU %d", mtu)
-
 	conn, err := kcp.NewConn2(t.remoteAddr, nil, 0, 0, t.dnsPacketConn)
-	if err != nil {
-		return fmt.Errorf("opening KCP conn: %v", err)
-	}
+	if err != nil { return fmt.Errorf("opening KCP conn: %v", err) }
 	log.Infof("session %08x ready", conn.GetConv())
 	conn.SetStreamMode(true)
 	conn.SetNoDelay(0, 0, 0, 1)
@@ -406,56 +300,52 @@ func (t *Tunnel) InitiateKCPConn(mtu int) error {
 		conn.Close()
 		return fmt.Errorf("failed to set KCP MTU to %d", mtu)
 	}
-
 	t.kcpConn = conn
 	return nil
 }
 
-// InitiateNoiseChannel performs the Noise protocol handshake with a timeout.
-// The timeout is controlled by HandshakeTimeout (default 30s).
 func (t *Tunnel) InitiateNoiseChannel() error {
 	t.applyDefaults()
 	rw, err := noiseHandshake(t.kcpConn, t.TunnelServer.decodedNoisePubKey, t.HandshakeTimeout)
-	if err != nil {
-		return err
-	}
+	if err != nil { return err }
 	t.noiseChannel = rw
 	return nil
 }
 
-// noiseHandshake performs the Noise handshake on conn with a deadline.
-// It sets a deadline before the handshake and clears it after, so the
-// deadline does not affect subsequent reads/writes on the connection.
 func noiseHandshake(conn *kcp.UDPSession, pubkey []byte, timeout time.Duration) (io.ReadWriteCloser, error) {
-	conn.SetDeadline(time.Now().Add(timeout))
-	rw, err := noise.NewClient(conn, pubkey)
-	conn.SetDeadline(time.Time{}) // clear deadline
-	if err != nil {
-		return nil, fmt.Errorf("noise handshake: %v", err)
+	type result struct {
+		rw  io.ReadWriteCloser
+		err error
 	}
-	return rw, nil
+	ch := make(chan result, 1)
+	go func() {
+		rw, err := noise.NewClient(conn, pubkey)
+		ch <- result{rw, err}
+	}()
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case res := <-ch:
+		if res.err != nil { return nil, fmt.Errorf("noise handshake: %v", res.err) }
+		return res.rw, nil
+	case <-timer.C:
+		return nil, fmt.Errorf("noise handshake: timeout")
+	}
 }
 
-// InitiateSmuxSession establishes a multiplexed session over the Noise channel.
 func (t *Tunnel) InitiateSmuxSession() error {
 	t.applyDefaults()
-
 	smuxConfig := smux.DefaultConfig()
 	smuxConfig.Version = 2
 	smuxConfig.KeepAliveInterval = t.KeepAlive
 	smuxConfig.KeepAliveTimeout = t.IdleTimeout
 	smuxConfig.MaxStreamBuffer = 1 * 1024 * 1024
 	sess, err := smux.Client(t.noiseChannel, smuxConfig)
-	if err != nil {
-		return fmt.Errorf("opening smux session: %v", err)
-	}
+	if err != nil { return fmt.Errorf("opening smux session: %v", err) }
 	t.smuxSession = sess
 	return nil
 }
 
-// openStreamWithTimeout opens an smux stream with a timeout. If the open
-// succeeds after the timeout, the late stream is closed to avoid leaking
-// capacity.
 func openStreamWithTimeout(conv uint32, timeout time.Duration, open func() (*smux.Stream, error)) (*smux.Stream, error) {
 	type result struct {
 		stream *smux.Stream
@@ -466,136 +356,78 @@ func openStreamWithTimeout(conv uint32, timeout time.Duration, open func() (*smu
 		s, err := open()
 		ch <- result{s, err}
 	}()
-
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
-
 	select {
 	case r := <-ch:
-		if r.err != nil {
-			return nil, fmt.Errorf("session %08x opening stream: %v", conv, r.err)
-		}
+		if r.err != nil { return nil, fmt.Errorf("session %08x opening stream: %v", conv, r.err) }
 		return r.stream, nil
 	case <-timer.C:
-		go func() {
-			if r, ok := <-ch; ok && r.stream != nil {
-				r.stream.Close()
-			}
-		}()
+		go func() { if r, ok := <-ch; ok && r.stream != nil { r.stream.Close() } }()
 		return nil, fmt.Errorf("session %08x opening stream: timed out after %v", conv, timeout)
 	}
 }
 
-// shouldLogCopyError returns true if the error from io.Copy is worth logging.
-// Expected close/EOF/timeout errors are filtered out.
 func shouldLogCopyError(err error) bool {
-	if err == nil || err == io.EOF || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) {
-		return false
-	}
+	if err == nil || err == io.EOF || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed) { return false }
 	var ne net.Error
-	if errors.As(err, &ne) && ne.Timeout() {
-		return false
-	}
+	if errors.As(err, &ne) && ne.Timeout() { return false }
 	return true
 }
 
-// OpenStream opens a new multiplexed stream. Returns a net.Conn.
 func (t *Tunnel) OpenStream() (net.Conn, error) {
-	if t.smuxSession == nil {
-		return nil, fmt.Errorf("smux session is not initialized")
-	}
-
+	if t.smuxSession == nil { return nil, fmt.Errorf("smux session is not initialized") }
 	timeout := t.OpenStreamTimeout
-	if timeout <= 0 {
-		timeout = DefaultOpenStreamTimeout
-	}
-
+	if timeout <= 0 { timeout = DefaultOpenStreamTimeout }
 	var conv uint32
-	if t.kcpConn != nil {
-		conv = t.kcpConn.GetConv()
-	}
-
+	if t.kcpConn != nil { conv = t.kcpConn.GetConv() }
 	stream, err := openStreamWithTimeout(conv, timeout, t.smuxSession.OpenStream)
-	if err != nil {
-		return nil, err
-	}
+	if err != nil { return nil, err }
 	log.Debugf("stream %08x:%d ready", conv, stream.ID())
 	return stream, nil
 }
 
-// Handle forwards data between a local TCP connection and a tunnel stream.
 func (t *Tunnel) Handle(lconn *net.TCPConn) error {
 	stream, err := t.OpenStream()
-	if err != nil {
-		return err
-	}
+	if err != nil { return err }
 	defer stream.Close()
-
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		_, err := io.Copy(stream, lconn)
-		if shouldLogCopyError(err) {
-			log.Warnf("copy stream←local: %v", err)
-		}
+		if shouldLogCopyError(err) { log.Warnf("copy stream←local: %v", err) }
 		lconn.CloseRead()
 		stream.Close()
 	}()
 	go func() {
 		defer wg.Done()
 		_, err := io.Copy(lconn, stream)
-		if shouldLogCopyError(err) {
-			log.Warnf("copy local←stream: %v", err)
-		}
+		if shouldLogCopyError(err) { log.Warnf("copy local←stream: %v", err) }
 		lconn.CloseWrite()
 		lconn.CloseRead()
 	}()
 	wg.Wait()
-
 	return nil
 }
 
-// Close tears down the tunnel and all its layers.
 func (t *Tunnel) Close() error {
-	if t.smuxSession != nil {
-		t.smuxSession.Close()
-		t.smuxSession = nil
-	}
-	if t.noiseChannel != nil {
-		t.noiseChannel.Close()
-		t.noiseChannel = nil
-	}
-	if t.kcpConn != nil {
-		log.Debugf("session %08x closed", t.kcpConn.GetConv())
-		t.kcpConn.Close()
-		t.kcpConn = nil
-	}
+	if t.smuxSession != nil { t.smuxSession.Close(); t.smuxSession = nil }
+	if t.noiseChannel != nil { t.noiseChannel.Close(); t.noiseChannel = nil }
+	if t.kcpConn != nil { log.Debugf("session %08x closed", t.kcpConn.GetConv()); t.kcpConn.Close(); t.kcpConn = nil }
 	t.closeTransportLayers()
 	return nil
 }
 
-// closeTransportLayers tears down the DNS and resolver transport layers.
-// Safe to call multiple times.
 func (t *Tunnel) closeTransportLayers() {
-	if t.dnsPacketConn != nil {
-		t.dnsPacketConn.Close()
-		t.dnsPacketConn = nil
-	}
-	if t.resolverConn != nil {
-		t.resolverConn.Close()
-		t.resolverConn = nil
-	}
+	if t.dnsPacketConn != nil { t.dnsPacketConn.Close(); t.dnsPacketConn = nil }
+	if t.resolverConn != nil { t.resolverConn.Close(); t.resolverConn = nil }
 	t.forgedStats = nil
 }
 
-// resetTransportLayers tears down existing transport layers and creates fresh
-// ones. Used during reconnect to ensure a clean transport stack.
 func (t *Tunnel) resetTransportLayers() error {
 	t.closeTransportLayers()
-	if err := t.InitiateResolverConnection(); err != nil {
-		return fmt.Errorf("resolver connection: %w", err)
-	}
+	if err := t.InitiateResolverConnection(); err != nil { return fmt.Errorf("resolver connection: %w", err) }
 	if err := t.InitiateDNSPacketConn(t.TunnelServer.Addr); err != nil {
 		t.closeTransportLayers()
 		return fmt.Errorf("DNS packet conn: %w", err)
@@ -603,136 +435,131 @@ func (t *Tunnel) resetTransportLayers() error {
 	return nil
 }
 
-// ListenAndServe starts a TCP listener and forwards connections through the
-// tunnel with automatic session reconnection. This is the main entry point
-// for the CLI.
 func (t *Tunnel) ListenAndServe(listenAddr string) error {
 	t.applyDefaults()
-
 	localAddr, err := net.ResolveTCPAddr("tcp", listenAddr)
-	if err != nil {
-		return fmt.Errorf("invalid listen address: %v", err)
-	}
+	if err != nil { return fmt.Errorf("invalid listen address: %v", err) }
+	ln, err := net.ListenTCP("tcp", localAddr)
+	if err != nil { return fmt.Errorf("opening local listener: %v", err) }
+	log.Infof("listening on %s", ln.Addr())
+	return t.Serve(ln)
+}
+
+func (t *Tunnel) Serve(ln net.Listener) error {
+	t.applyDefaults()
+	defer ln.Close()
+	defer t.closeTransportLayers()
+	defer t.connWG.Wait()
 
 	maxQnameLen := t.TunnelServer.effectiveMaxQnameLen()
 	mtu := DNSNameCapacity(t.TunnelServer.Addr, maxQnameLen, t.TunnelServer.MaxNumLabels) - t.wireConfig.DataOverhead()
-	if mtu < 25 {
-		return fmt.Errorf("MTU %d is too small (minimum 25); try increasing -max-qname-len (currently %d), increasing -max-num-labels (currently %d), using a shorter domain, or decreasing -clientid-size (currently %d)",
-			mtu, maxQnameLen, t.TunnelServer.MaxNumLabels, t.wireConfig.ClientIDSize)
-	}
+	if mtu < 25 { return fmt.Errorf("MTU %d too small", mtu) }
 	log.Infof("effective MTU %d", mtu)
 
-	ln, err := net.ListenTCP("tcp", localAddr)
-	if err != nil {
-		return fmt.Errorf("opening local listener: %v", err)
-	}
-	defer ln.Close()
-	defer t.closeTransportLayers()
-
 	var sem chan struct{}
-	if t.MaxStreams > 0 {
-		sem = make(chan struct{}, t.MaxStreams)
-	}
+	if t.MaxStreams > 0 { sem = make(chan struct{}, t.MaxStreams) }
 
 	for {
-		// Rebuild the transport stack from the resolver upward.
+		select {
+		case <-t.Context.Done(): return t.Context.Err()
+		default:
+		}
+
 		var transportErrCh <-chan error
 		delay := t.ReconnectMinDelay
 		for {
+			select {
+			case <-t.Context.Done(): return t.Context.Err()
+			default:
+			}
 			if err := t.resetTransportLayers(); err != nil {
-				log.Warnf("transport rebuild failed: %v; retrying in %v", err, delay)
-				time.Sleep(delay)
-				delay *= 2
-				if delay > t.ReconnectMaxDelay {
-					delay = t.ReconnectMaxDelay
+				log.Warnf("rebuild failed: %v; retry in %v", err, delay)
+				select {
+				case <-t.Context.Done(): return t.Context.Err()
+				case <-time.After(delay):
 				}
+				delay *= 2
+				if delay > t.ReconnectMaxDelay { delay = t.ReconnectMaxDelay }
 				continue
 			}
 			transportErrCh = t.dnsPacketConn.TransportErrors()
 			break
 		}
 
-		// Create a new tunnel session with exponential backoff.
 		var conn *kcp.UDPSession
 		var sess *smux.Session
+		var err error
 		delay = t.ReconnectMinDelay
 		for {
+			select {
+			case <-t.Context.Done(): return t.Context.Err()
+			default:
+			}
 			conn, sess, err = t.createSession(mtu)
-			if err == nil {
-				break
+			if err == nil { break }
+			log.Warnf("creation failed: %v; retry in %v", err, delay)
+			select {
+			case <-t.Context.Done(): return t.Context.Err()
+			case <-time.After(delay):
 			}
-			log.Warnf("session creation failed: %v; retrying in %v", err, delay)
-			time.Sleep(delay)
 			delay *= 2
-			if delay > t.ReconnectMaxDelay {
-				delay = t.ReconnectMaxDelay
-			}
+			if delay > t.ReconnectMaxDelay { delay = t.ReconnectMaxDelay }
+		}
+
+		if t.ReadyCallback != nil {
+			t.ReadyCallback(ln.Addr().String())
+			t.ReadyCallback = nil
 		}
 
 		sessDone := sess.CloseChan()
 		conv := conn.GetConv()
-
+		tcpln, _ := ln.(*net.TCPListener)
 		sessionAlive := true
 		for sessionAlive {
-			ln.SetDeadline(time.Now().Add(t.SessionCheckInterval))
-			local, err := ln.Accept()
-			if err != nil {
-				if ne, ok := err.(net.Error); ok && ne.Timeout() {
-					select {
-					case <-sessDone:
-						sessionAlive = false
-					case tErr := <-transportErrCh:
-						log.Warnf("session %08x transport error: %v", conv, tErr)
-						sessionAlive = false
-					default:
-					}
-					continue
-				}
-				sess.Close()
-				conn.Close()
-				t.closeTransportLayers()
-				return err
-			}
-
 			select {
-			case <-sessDone:
-				local.Close()
-				sessionAlive = false
-				continue
-			case tErr := <-transportErrCh:
-				log.Warnf("session %08x transport error: %v", conv, tErr)
-				local.Close()
-				sessionAlive = false
-				continue
+			case <-t.Context.Done():
+				sess.Close(); conn.Close(); t.closeTransportLayers()
+				return t.Context.Err()
 			default:
 			}
 
+			if tcpln != nil { tcpln.SetDeadline(time.Now().Add(100 * time.Millisecond)) }
+			local, err := ln.Accept()
+			if tcpln != nil { tcpln.SetDeadline(time.Time{}) }
+			if err != nil {
+				if ne, ok := err.(net.Error); ok && (ne.Timeout() || ne.Temporary()) {
+					select {
+					case <-sessDone: sessionAlive = false; continue
+					case <-t.Context.Done(): sessionAlive = false; continue
+					case tErr := <-transportErrCh:
+						log.Warnf("session %08x transport error: %v", conv, tErr)
+						sessionAlive = false; continue
+					default: continue
+					}
+				}
+				sess.Close(); conn.Close(); t.closeTransportLayers()
+				return err
+			}
+
 			go func(sess *smux.Session, conv uint32) {
+				t.connWG.Add(1)
+				defer t.connWG.Done()
 				if sem != nil {
 					sem <- struct{}{}
 					defer func() { <-sem }()
 				}
 				defer local.Close()
 				err := t.handleConn(local.(*net.TCPConn), sess, conv)
-				if err != nil {
-					log.Warnf("handle: %v", err)
-				}
+				if err != nil { log.Warnf("handle: %v", err) }
 			}(sess, conv)
 		}
-
-		log.Warnf("session %08x closed, reconnecting", conv)
-		sess.Close()
-		conn.Close()
-		t.closeTransportLayers()
+		sess.Close(); conn.Close(); t.closeTransportLayers()
 	}
 }
 
-// createSession creates a KCP+Noise+smux session (used by ListenAndServe).
 func (t *Tunnel) createSession(mtu int) (*kcp.UDPSession, *smux.Session, error) {
 	conn, err := kcp.NewConn2(t.remoteAddr, nil, 0, 0, t.dnsPacketConn)
-	if err != nil {
-		return nil, nil, fmt.Errorf("opening KCP conn: %v", err)
-	}
+	if err != nil { return nil, nil, fmt.Errorf("opening KCP conn: %v", err) }
 	log.Infof("session %08x ready", conn.GetConv())
 	conn.SetStreamMode(true)
 	conn.SetNoDelay(0, 0, 0, 1)
@@ -741,13 +568,11 @@ func (t *Tunnel) createSession(mtu int) (*kcp.UDPSession, *smux.Session, error) 
 		conn.Close()
 		return nil, nil, fmt.Errorf("failed to set KCP MTU to %d", mtu)
 	}
-
 	rw, err := noiseHandshake(conn, t.TunnelServer.decodedNoisePubKey, t.HandshakeTimeout)
 	if err != nil {
 		conn.Close()
 		return nil, nil, err
 	}
-
 	smuxConfig := smux.DefaultConfig()
 	smuxConfig.Version = 2
 	smuxConfig.KeepAliveInterval = t.KeepAlive
@@ -758,120 +583,73 @@ func (t *Tunnel) createSession(mtu int) (*kcp.UDPSession, *smux.Session, error) 
 		conn.Close()
 		return nil, nil, fmt.Errorf("opening smux session: %v", err)
 	}
-
 	return conn, sess, nil
 }
 
-// handleConn forwards a single TCP connection through the tunnel session.
 func (t *Tunnel) handleConn(local *net.TCPConn, sess *smux.Session, conv uint32) error {
 	stream, err := openStreamWithTimeout(conv, t.OpenStreamTimeout, sess.OpenStream)
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		log.Debugf("stream %08x:%d closed", conv, stream.ID())
-		stream.Close()
-	}()
+	if err != nil { return err }
+	defer func() { log.Debugf("stream %08x:%d closed", conv, stream.ID()); stream.Close() }()
 	log.Infof("stream %08x:%d ready", conv, stream.ID())
-
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		_, err := io.Copy(stream, local)
-		if shouldLogCopyError(err) {
-			log.Warnf("stream %08x:%d copy stream←local: %v", conv, stream.ID(), err)
-		}
+		if shouldLogCopyError(err) { log.Warnf("stream %08x:%d copy stream←local: %v", conv, stream.ID(), err) }
 		local.CloseRead()
 		stream.Close()
 	}()
 	go func() {
 		defer wg.Done()
 		_, err := io.Copy(local, stream)
-		if shouldLogCopyError(err) {
-			log.Warnf("stream %08x:%d copy local←stream: %v", conv, stream.ID(), err)
-		}
+		if shouldLogCopyError(err) { log.Warnf("stream %08x:%d copy local←stream: %v", conv, stream.ID(), err) }
 		local.CloseWrite()
 		local.CloseRead()
 	}()
 	wg.Wait()
-
 	return nil
 }
 
-// DNSNameCapacity returns the number of raw bytes that can be encoded in a DNS
-// query name, given the domain suffix and encoding constraints.
 func DNSNameCapacity(domain dns.Name, maxQnameLen int, maxNumLabels int) int {
 	const labelLen = 63
-
-	if maxQnameLen <= 0 || maxQnameLen > 253 {
-		maxQnameLen = 253
-	}
-
+	if maxQnameLen <= 0 || maxQnameLen > 253 { maxQnameLen = 253 }
 	domainWireLen := 0
-	for _, label := range domain {
-		domainWireLen += 1 + len(label)
-	}
-
+	for _, label := range domain { domainWireLen += 1 + len(label) }
 	availableWireBytes := maxQnameLen - domainWireLen
-	if availableWireBytes <= 0 {
-		return 0
-	}
-
+	if availableWireBytes <= 0 { return 0 }
 	encodedCapacity := availableWireBytes * labelLen / (labelLen + 1)
-
 	if maxNumLabels > 0 {
 		maxEncoded := maxNumLabels * labelLen
-		if encodedCapacity > maxEncoded {
-			encodedCapacity = maxEncoded
-		}
+		if encodedCapacity > maxEncoded { encodedCapacity = maxEncoded }
 	}
-
 	rawCapacity := encodedCapacity * 5 / 8
 	return rawCapacity
 }
 
-// SampleUTLSDistribution parses a weighted distribution string (e.g.,
-// "3*Firefox,2*Chrome,1*iOS") and randomly selects a ClientHelloID.
 func SampleUTLSDistribution(spec string) (*utls.ClientHelloID, error) {
 	weights, labels, err := parseWeightedList(spec)
-	if err != nil {
-		return nil, err
-	}
+	if err != nil { return nil, err }
 	ids := make([]*utls.ClientHelloID, 0, len(labels))
 	for _, label := range labels {
 		var id *utls.ClientHelloID
-		if label == "none" {
-			id = nil
-		} else {
+		if label == "none" { id = nil } else {
 			id = UTLSLookup(label)
-			if id == nil {
-				return nil, fmt.Errorf("unknown TLS fingerprint %q", label)
-			}
+			if id == nil { return nil, fmt.Errorf("unknown TLS fingerprint %q", label) }
 		}
 		ids = append(ids, id)
 	}
 	return ids[sampleWeighted(weights)], nil
 }
 
-// UTLSClientHelloIDMap returns the list of supported uTLS fingerprint labels.
-func UTLSClientHelloIDMap() []struct {
-	Label string
-	ID    *utls.ClientHelloID
-} {
-	return utlsClientHelloIDMap
-}
+func UTLSClientHelloIDMap() []struct { Label string; ID *utls.ClientHelloID } { return utlsClientHelloIDMap }
 
-// Outbound provides a high-level API for creating tunnels from multiple
-// resolvers and tunnel servers.
 type Outbound struct {
 	Resolvers     []Resolver
 	TunnelServers []TunnelServer
 	tunnels       []*Tunnel
 }
 
-// NewOutbound creates an Outbound with the given resolvers and tunnel servers.
 func NewOutbound(resolvers []Resolver, tunnelServers []TunnelServer) *Outbound {
 	return &Outbound{
 		Resolvers:     resolvers,
@@ -879,17 +657,11 @@ func NewOutbound(resolvers []Resolver, tunnelServers []TunnelServer) *Outbound {
 	}
 }
 
-// Start begins accepting connections on bind and forwarding them through the
-// first resolver/server pair.
 func (o *Outbound) Start(bind string) error {
 	resolver := o.Resolvers[0]
 	tunnelServer := o.TunnelServers[0]
-
 	tunnel, err := NewTunnel(resolver, tunnelServer)
-	if err != nil {
-		return fmt.Errorf("failed to create tunnel: %w", err)
-	}
+	if err != nil { return fmt.Errorf("failed to create tunnel: %w", err) }
 	o.tunnels = []*Tunnel{tunnel}
-
 	return tunnel.ListenAndServe(bind)
 }

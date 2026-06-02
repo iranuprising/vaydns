@@ -15,8 +15,8 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	"github.com/net2share/vaydns/dns"
-	"github.com/net2share/vaydns/turbotunnel"
+	"vaydns-go/dns"
+	"vaydns-go/turbotunnel"
 )
 
 const (
@@ -436,7 +436,7 @@ func chunks(p []byte, n int) [][]byte {
 //   - Data query:  [ClientID:N][DataLen:1][Data]
 //   - Poll query:  [ClientID:N][Nonce:4]  (4 random bytes for cache busting)
 //
-// dnstt compatibility encoding format (when -compat dnstt):
+// VayDNS compatibility encoding format (when -compat vaydns):
 //   - Data query:  [ClientID:8][PaddingPrefix:224+3][Padding:3][DataLen:1][Data]
 //   - Poll query:  [ClientID:8][PaddingPrefix:224+8][Padding:8]
 //
@@ -570,17 +570,15 @@ func (c *DNSPacketConn) sendLoop(transport net.PacketConn, addr net.Addr) error 
 		// Prioritize sending an actual data packet from outgoing. Only
 		// consider a poll when outgoing is empty.
 		select {
-		case <-closed:
-			return nil
 		case p = <-outgoing:
 		default:
 			select {
-			case <-closed:
-				return nil
 			case p = <-outgoing:
 			case <-c.pollChan:
 			case <-pollTimer.C:
 				pollTimerExpired = true
+			case <-closed:
+				return nil
 			}
 		}
 
@@ -592,7 +590,6 @@ func (c *DNSPacketConn) sendLoop(transport net.PacketConn, addr net.Addr) error 
 			default:
 			}
 		}
-
 		if pollTimerExpired {
 			// We're polling because it's been a while since we last
 			// polled. Increase the poll delay.
@@ -615,11 +612,6 @@ func (c *DNSPacketConn) sendLoop(transport net.PacketConn, addr net.Addr) error 
 		// the data capacity of queries is so limited, it's not worth
 		// trying to send more than one packet per query.
 		c.rateLimiter.Wait()
-		select {
-		case <-closed:
-			return nil
-		default:
-		}
 		err := c.send(transport, p, addr)
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Timeout() {
@@ -628,5 +620,5 @@ func (c *DNSPacketConn) sendLoop(transport net.PacketConn, addr net.Addr) error 
 			}
 			return err
 		}
-	}
+		}
 }
