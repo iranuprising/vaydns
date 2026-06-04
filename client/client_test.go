@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/net2share/vaydns/dns"
+	"vaydns-go/dns"
 )
 
 func TestDNSNameCapacity(t *testing.T) {

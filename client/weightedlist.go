@@ -152,7 +152,7 @@ func parseWeightedList(s string) ([]uint32, []string, error) {
 				return nil, nil, fmt.Errorf("unexpected %s", ttext)
 			}
 		default:
-			panic(state)
+			log.Print(state)
 		}
 	}
 
@@ -170,7 +170,7 @@ func (s cryptoSource) Int63() int64 {
 	var n int64
 	err := binary.Read(cryptorand.Reader, binary.BigEndian, &n)
 	if err != nil {
-		panic(err)
+		log.Print(err)
 	}
 	n &= (1 << 63) - 1
 	return n
@@ -184,11 +184,11 @@ func sampleWeighted(weights []uint32) int {
 	for _, w := range weights {
 		sum += int64(w)
 		if sum < int64(w) {
-			panic("weights overflow")
+			log.Print("weights overflow")
 		}
 	}
 	if sum == 0 {
-		panic("total weight is zero")
+		log.Print("total weight is zero")
 	}
 	r := uint64(mathrand.New(&cryptoSource{}).Int63n(sum))
 	for i, w := range weights {
@@ -197,5 +197,5 @@ func sampleWeighted(weights []uint32) int {
 		}
 		r -= uint64(w)
 	}
-	panic("impossible")
+	log.Print("impossible")
 }

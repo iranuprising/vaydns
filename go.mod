@@ -1,4 +1,4 @@
-module github.com/net2share/vaydns
+module vaydns-go
 
 go 1.24.4
 

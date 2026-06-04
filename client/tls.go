@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/net2share/vaydns/turbotunnel"
+	"vaydns-go/turbotunnel"
 )
 
 const dialTimeout = 30 * time.Second

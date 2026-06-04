@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/net2share/vaydns/turbotunnel"
+	"vaydns-go/turbotunnel"
 )
 
 // A default Retry-After delay to use when there is no explicit Retry-After

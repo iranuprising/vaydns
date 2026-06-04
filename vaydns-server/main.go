@@ -65,9 +65,9 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"github.com/jellydator/ttlcache/v3"
-	"github.com/net2share/vaydns/dns"
-	"github.com/net2share/vaydns/noise"
-	"github.com/net2share/vaydns/turbotunnel"
+	"vaydns-go/dns"
+	"vaydns-go/noise"
+	"vaydns-go/turbotunnel"
 	"github.com/xtaci/kcp-go/v5"
 	"github.com/xtaci/smux"
 )

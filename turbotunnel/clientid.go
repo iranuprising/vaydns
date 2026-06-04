@@ -24,7 +24,8 @@ func NewClientID(size int) ClientID {
 	buf := make([]byte, size)
 	_, err := rand.Read(buf)
 	if err != nil {
-		panic(err)
+		log.Print(err)
+		return ID{}
 	}
 	return ClientID(buf)
 }
