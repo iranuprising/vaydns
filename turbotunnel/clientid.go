@@ -3,6 +3,7 @@ package turbotunnel
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"log"
 )
 
 // ClientID is an abstract identifier that binds together all the communications
@@ -25,7 +26,7 @@ func NewClientID(size int) ClientID {
 	_, err := rand.Read(buf)
 	if err != nil {
 		log.Print(err)
-		return ID{}
+		return ClientID("")
 	}
 	return ClientID(buf)
 }

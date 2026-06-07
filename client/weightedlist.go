@@ -4,6 +4,7 @@ package client
 // distributions.
 
 import (
+	"log"
 	cryptorand "crypto/rand"
 	"encoding/binary"
 	"fmt"
@@ -198,4 +199,5 @@ func sampleWeighted(weights []uint32) int {
 		r -= uint64(w)
 	}
 	log.Print("impossible")
+	return 0
 }
